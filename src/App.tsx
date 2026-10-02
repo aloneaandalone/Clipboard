@@ -1,10 +1,11 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import type { ClipboardItem, AppSettings } from './vite-env.d'
 
-type TabType = 'all' | 'favorites' | 'settings'
+type TabType = 'all' | 'files' | 'favorites' | 'settings'
 
 const DEFAULT_SHORTCUT = 'CommandOrControl+Shift+V'
 const DEFAULT_MAX_HISTORY = 200
+const DEFAULT_MAX_FILES = 100
 
 // Convert Electron accelerator to display text
 function shortcutToDisplay(shortcut: string): string {
@@ -49,6 +50,39 @@ function eventToAccelerator(e: KeyboardEvent): string | null {
   return keys.join('+')
 }
 
+// Format file size to human readable
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`
+}
+
+// Get file icon based on extension
+function getFileIcon(fileName: string): string {
+  const ext = fileName.split('.').pop()?.toLowerCase() || ''
+  const iconMap: Record<string, string> = {
+    // Images
+    png: '🖼️', jpg: '🖼️', jpeg: '🖼️', gif: '🖼️', bmp: '🖼️', svg: '🖼️', webp: '🖼️', ico: '🖼️',
+    // Documents
+    pdf: '📄', doc: '📝', docx: '📝', txt: '📃', md: '📝', rtf: '📝',
+    xls: '📊', xlsx: '📊', csv: '📊',
+    ppt: '📽️', pptx: '📽️',
+    // Archives
+    zip: '📦', rar: '📦', '7z': '📦', tar: '📦', gz: '📦',
+    // Audio
+    mp3: '🎵', wav: '🎵', flac: '🎵', aac: '🎵', ogg: '🎵', m4a: '🎵',
+    // Video
+    mp4: '🎬', avi: '🎬', mkv: '🎬', mov: '🎬', wmv: '🎬', flv: '🎬', webm: '🎬',
+    // Code
+    js: '💻', ts: '💻', jsx: '💻', tsx: '💻', html: '💻', css: '💻', scss: '💻',
+    py: '💻', java: '💻', cpp: '💻', c: '💻', h: '💻', json: '💻', xml: '💻',
+    // Executables
+    exe: '⚙️', msi: '⚙️', bat: '⚙️', cmd: '⚙️', ps1: '⚙️', sh: '⚙️',
+  }
+  return iconMap[ext] || '📄'
+}
+
 function App() {
   const [items, setItems] = useState<ClipboardItem[]>([])
   const [searchQuery, setSearchQuery] = useState('')
@@ -58,7 +92,11 @@ function App() {
   const searchRef = useRef<HTMLInputElement>(null)
 
   // Settings state
-  const [settings, setSettings] = useState<AppSettings>({ toggleShortcut: DEFAULT_SHORTCUT, maxHistory: DEFAULT_MAX_HISTORY })
+  const [settings, setSettings] = useState<AppSettings>({
+    toggleShortcut: DEFAULT_SHORTCUT,
+    maxHistory: DEFAULT_MAX_HISTORY,
+    maxFiles: DEFAULT_MAX_FILES,
+  })
   const [isRecording, setIsRecording] = useState(false)
   const [recordedKeys, setRecordedKeys] = useState<string>('')
   const [saveStatus, setSaveStatus] = useState<'idle' | 'success' | 'error'>('idle')
@@ -67,8 +105,10 @@ function App() {
   // Filter items based on search and tab
   const filteredItems = items.filter(item => {
     const matchesSearch = searchQuery === '' ||
-      item.text.toLowerCase().includes(searchQuery.toLowerCase())
+      item.preview.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      (item.fileName && item.fileName.toLowerCase().includes(searchQuery.toLowerCase()))
     const matchesTab = activeTab === 'all' ||
+      (activeTab === 'files' && item.type === 'file') ||
       (activeTab === 'favorites' && item.favorite)
     return matchesSearch && matchesTab
   })
@@ -112,7 +152,6 @@ function App() {
   // Keyboard navigation (only when not in settings tab and not recording)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      // Don't handle nav while recording shortcut or in settings tab
       if (isRecording || activeTab === 'settings') return
 
       if (e.key === 'ArrowDown') {
@@ -126,7 +165,7 @@ function App() {
       } else if (e.key === 'Enter') {
         e.preventDefault()
         if (filteredItems[selectedIndex]) {
-          handleCopy(filteredItems[selectedIndex].text)
+          handleCopy(filteredItems[selectedIndex].id)
         }
       } else if (e.key === 'Escape') {
         e.preventDefault()
@@ -155,7 +194,6 @@ function App() {
       if (accelerator) {
         setRecordedKeys(accelerator)
       } else {
-        // Show partial (modifiers only) as feedback
         const mods: string[] = []
         if (e.ctrlKey) mods.push('Ctrl')
         if (e.altKey) mods.push('Alt')
@@ -168,7 +206,6 @@ function App() {
     }
 
     const handleKeyUp = (e: KeyboardEvent) => {
-      // When all modifiers are released, finalize if we have a valid shortcut
       const accelerator = eventToAccelerator(e)
       if (accelerator) {
         confirmShortcut(accelerator)
@@ -192,8 +229,8 @@ function App() {
     }
   }, [selectedIndex])
 
-  const handleCopy = useCallback((text: string) => {
-    window.clipboardApi?.copyItem(text)
+  const handleCopy = useCallback((id: string) => {
+    window.clipboardApi?.copyItem(id)
     window.clipboardApi?.hideWindow()
   }, [])
 
@@ -204,6 +241,16 @@ function App() {
   const handleToggleFavorite = useCallback((id: string, e: React.MouseEvent) => {
     e.stopPropagation()
     window.clipboardApi?.toggleFavorite(id)
+  }, [])
+
+  const handleOpenFile = useCallback((id: string, e: React.MouseEvent) => {
+    e.stopPropagation()
+    window.clipboardApi?.openFile(id)
+  }, [])
+
+  const handleOpenFileLocation = useCallback((id: string, e: React.MouseEvent) => {
+    e.stopPropagation()
+    window.clipboardApi?.openFileLocation(id)
   }, [])
 
   const handleClearAll = useCallback(() => {
@@ -255,11 +302,22 @@ function App() {
     await window.clipboardApi?.setMaxHistory(clamped)
   }, [])
 
+  const handleMaxFilesChange = useCallback(async (value: number) => {
+    const clamped = Math.max(1, Math.min(500, Math.floor(value)))
+    setSettings(prev => ({ ...prev, maxFiles: clamped }))
+    await window.clipboardApi?.setMaxFiles(clamped)
+  }, [])
+
   const resetAllSettings = useCallback(async () => {
     if (window.clipboardApi) {
       await window.clipboardApi.setToggleShortcut(DEFAULT_SHORTCUT)
       await window.clipboardApi.setMaxHistory(DEFAULT_MAX_HISTORY)
-      setSettings({ toggleShortcut: DEFAULT_SHORTCUT, maxHistory: DEFAULT_MAX_HISTORY })
+      await window.clipboardApi.setMaxFiles(DEFAULT_MAX_FILES)
+      setSettings({
+        toggleShortcut: DEFAULT_SHORTCUT,
+        maxHistory: DEFAULT_MAX_HISTORY,
+        maxFiles: DEFAULT_MAX_FILES,
+      })
       setSaveStatus('success')
       setTimeout(() => setSaveStatus('idle'), 2000)
     }
@@ -286,6 +344,8 @@ function App() {
   }
 
   const isSettingsTab = activeTab === 'settings'
+  const fileCount = items.filter(i => i.type === 'file').length
+  const textCount = items.filter(i => i.type === 'text').length
 
   return (
     <div className="app">
@@ -336,6 +396,12 @@ function App() {
           onClick={() => setActiveTab('all')}
         >
           全部 ({items.length})
+        </button>
+        <button
+          className={`tab ${activeTab === 'files' ? 'active' : ''}`}
+          onClick={() => setActiveTab('files')}
+        >
+          📁 文件 ({fileCount})
         </button>
         <button
           className={`tab ${activeTab === 'favorites' ? 'active' : ''}`}
@@ -411,8 +477,8 @@ function App() {
           </div>
 
           <div className="setting-section">
-            <div className="setting-title">存储设置</div>
-            <div className="setting-desc">调整剪贴板历史最多保存的条数</div>
+            <div className="setting-title">文字存储设置</div>
+            <div className="setting-desc">调整文字剪贴板历史最多保存的条数</div>
 
             <div className="setting-row">
               <div className="setting-label">最大存储条数</div>
@@ -449,7 +515,52 @@ function App() {
               <ul>
                 <li>范围：10 ~ 1000 条</li>
                 <li>收藏的内容不会被自动清理</li>
-                <li>调小数值后，超出的历史会被立即删除</li>
+                <li>当前已保存 {textCount} 条文字</li>
+              </ul>
+            </div>
+          </div>
+
+          <div className="setting-section">
+            <div className="setting-title">文件存储设置</div>
+            <div className="setting-desc">调整文件剪贴板最多保存的文件数量</div>
+
+            <div className="setting-row">
+              <div className="setting-label">最大文件数</div>
+              <div className="setting-control">
+                <input
+                  type="number"
+                  className="number-input"
+                  min={1}
+                  max={500}
+                  value={settings.maxFiles}
+                  onChange={e => handleMaxFilesChange(Number(e.target.value))}
+                />
+              </div>
+            </div>
+
+            <div className="slider-row">
+              <input
+                type="range"
+                className="slider"
+                min={1}
+                max={500}
+                step={1}
+                value={settings.maxFiles}
+                onChange={e => handleMaxFilesChange(Number(e.target.value))}
+              />
+              <div className="slider-labels">
+                <span>1</span>
+                <span>500</span>
+              </div>
+            </div>
+
+            <div className="setting-hints">
+              <div className="hint-title">💡 提示</div>
+              <ul>
+                <li>范围：1 ~ 500 个文件</li>
+                <li>文件会保存在本地存储目录中</li>
+                <li>收藏的文件不会被自动清理</li>
+                <li>当前已保存 {fileCount} 个文件</li>
               </ul>
             </div>
           </div>
@@ -457,7 +568,7 @@ function App() {
           <div className="setting-section">
             <div className="setting-title">关于</div>
             <div className="setting-desc">
-              Clipboard Vibe v1.0.0<br />
+              Clipboard Vibe v1.1.0<br />
               一个现代化的剪贴板历史管理器
             </div>
             <button
@@ -474,10 +585,20 @@ function App() {
             <div className="empty">
               <div className="empty-icon">📭</div>
               <div className="empty-text">
-                {searchQuery ? '没有找到匹配的内容' : activeTab === 'favorites' ? '还没有收藏的内容' : '剪贴板历史为空'}
+                {searchQuery
+                  ? '没有找到匹配的内容'
+                  : activeTab === 'favorites'
+                    ? '还没有收藏的内容'
+                    : activeTab === 'files'
+                      ? '还没有复制过文件'
+                      : '剪贴板历史为空'}
               </div>
               <div className="empty-hint">
-                {searchQuery ? '试试其他关键词' : '复制一些文字，它们会出现在这里'}
+                {searchQuery
+                  ? '试试其他关键词'
+                  : activeTab === 'files'
+                    ? '复制一些文件，它们会出现在这里'
+                    : '复制一些文字或文件，它们会出现在这里'}
               </div>
             </div>
           ) : (
@@ -485,36 +606,86 @@ function App() {
               <div
                 key={item.id}
                 data-index={index}
-                className={`item ${index === selectedIndex ? 'selected' : ''}`}
-                onClick={() => handleCopy(item.text)}
+                className={`item ${index === selectedIndex ? 'selected' : ''} ${item.type === 'file' ? 'item-file' : ''}`}
+                onClick={() => handleCopy(item.id)}
                 onMouseEnter={() => setSelectedIndex(index)}
               >
-                <div className="item-preview">{item.preview}</div>
-                <div className="item-meta">
-                  <span className="item-time">
-                    {item.favorite && '⭐ '}
-                    {formatTime(item.timestamp)}
-                  </span>
-                  <div className="item-actions">
-                    <button
-                      className={`mini-btn favorite ${item.favorite ? 'active' : ''}`}
-                      onClick={e => handleToggleFavorite(item.id, e)}
-                      title={item.favorite ? '取消收藏' : '收藏'}
-                    >
-                      {item.favorite ? '⭐' : '☆'}
-                    </button>
-                    <button
-                      className="mini-btn delete"
-                      onClick={e => {
-                        e.stopPropagation()
-                        handleDelete(item.id)
-                      }}
-                      title="删除"
-                    >
-                      ✕
-                    </button>
-                  </div>
-                </div>
+                {item.type === 'file' ? (
+                  <>
+                    <div className="file-icon">{getFileIcon(item.fileName || item.preview)}</div>
+                    <div className="item-content">
+                      <div className="file-name">{item.fileName || item.preview}</div>
+                      <div className="item-meta">
+                        <span className="item-time">
+                          {item.favorite && '⭐ '}
+                          {item.fileSize ? formatFileSize(item.fileSize) : ''} · {formatTime(item.timestamp)}
+                        </span>
+                        <div className="item-actions">
+                          <button
+                            className="mini-btn"
+                            onClick={e => handleOpenFile(item.id, e)}
+                            title="打开文件"
+                          >
+                            📂
+                          </button>
+                          <button
+                            className="mini-btn"
+                            onClick={e => handleOpenFileLocation(item.id, e)}
+                            title="打开所在位置"
+                          >
+                            📁
+                          </button>
+                          <button
+                            className={`mini-btn favorite ${item.favorite ? 'active' : ''}`}
+                            onClick={e => handleToggleFavorite(item.id, e)}
+                            title={item.favorite ? '取消收藏' : '收藏'}
+                          >
+                            {item.favorite ? '⭐' : '☆'}
+                          </button>
+                          <button
+                            className="mini-btn delete"
+                            onClick={e => {
+                              e.stopPropagation()
+                              handleDelete(item.id)
+                            }}
+                            title="删除"
+                          >
+                            ✕
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div className="item-preview">{item.preview}</div>
+                    <div className="item-meta">
+                      <span className="item-time">
+                        {item.favorite && '⭐ '}
+                        {formatTime(item.timestamp)}
+                      </span>
+                      <div className="item-actions">
+                        <button
+                          className={`mini-btn favorite ${item.favorite ? 'active' : ''}`}
+                          onClick={e => handleToggleFavorite(item.id, e)}
+                          title={item.favorite ? '取消收藏' : '收藏'}
+                        >
+                          {item.favorite ? '⭐' : '☆'}
+                        </button>
+                        <button
+                          className="mini-btn delete"
+                          onClick={e => {
+                            e.stopPropagation()
+                            handleDelete(item.id)
+                          }}
+                          title="删除"
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    </div>
+                  </>
+                )}
               </div>
             ))
           )}
@@ -534,7 +705,7 @@ function App() {
           <span className="kbd">↓</span>
           <span>选择</span>
           <span className="kbd">Enter</span>
-          <span>粘贴</span>
+          <span>复制</span>
           <span className="kbd">Esc</span>
           <span>关闭</span>
         </div>

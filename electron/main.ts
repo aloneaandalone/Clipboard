@@ -1,5 +1,7 @@
-import { app, BrowserWindow, clipboard, ipcMain, globalShortcut, Tray, Menu, nativeImage, screen } from 'electron'
+import { app, BrowserWindow, clipboard, ipcMain, globalShortcut, Tray, Menu, nativeImage, shell, screen } from 'electron'
 import * as path from 'path'
+import * as fs from 'fs'
+import { execSync } from 'child_process'
 import { ClipboardStore, SettingsStore } from './store'
 
 let mainWindow: BrowserWindow | null = null
@@ -8,10 +10,10 @@ let store: ClipboardStore | null = null
 let settingsStore: SettingsStore | null = null
 let isWatching = false
 let lastText = ''
+let lastFilePaths: string[] = []
 let currentShortcut: string = ''
 
 const POLL_INTERVAL = 500 // ms
-const MAX_HISTORY = 200
 
 // Simple clipboard SVG icon for tray
 const TRAY_ICON_SVG = `
@@ -111,17 +113,137 @@ function toggleWindow() {
   }
 }
 
+// Parse FileDrop (CF_HDROP) buffer to get multiple file paths
+function parseFileDrop(buffer: Buffer): string[] {
+  try {
+    // DROPFILES structure:
+    //   pFiles:  DWORD (4 bytes) - offset to file list
+    //   pt:      POINT (8 bytes) - x, y (LONG each)
+    //   fNC:     BOOL  (4 bytes)
+    //   fWide:   BOOL  (4 bytes)
+    if (buffer.length < 20) return []
+
+    const pFilesOffset = buffer.readUInt32LE(0)
+    const fWide = buffer.readUInt32LE(16) !== 0 // offset 20-4 = 16 (fWide is last field)
+
+    if (pFilesOffset >= buffer.length) return []
+
+    const fileData = buffer.slice(pFilesOffset)
+
+    if (fWide) {
+      // UTF-16LE, null-separated, double-null terminated
+      const paths: string[] = []
+      let start = 0
+      for (let i = 0; i < fileData.length - 1; i += 2) {
+        if (fileData.readUInt16LE(i) === 0) {
+          if (i === start) {
+            // Double null - end of list
+            break
+          }
+          const str = fileData.toString('utf16le', start, i)
+          if (str && fs.existsSync(str)) {
+            paths.push(str)
+          }
+          start = i + 2
+        }
+      }
+      return paths
+    } else {
+      // ANSI, null-separated, double-null terminated
+      const paths: string[] = []
+      let start = 0
+      for (let i = 0; i < fileData.length; i++) {
+        if (fileData[i] === 0) {
+          if (i === start) break
+          const str = fileData.toString('ascii', start, i)
+          if (str && fs.existsSync(str)) {
+            paths.push(str)
+          }
+          start = i + 1
+        }
+      }
+      return paths
+    }
+  } catch (e) {
+    console.error('Error parsing FileDrop:', e)
+    return []
+  }
+}
+
+// Get file paths from clipboard (Windows)
+function getClipboardFiles(): string[] {
+  try {
+    // Try FileDrop (CF_HDROP) first - supports multiple files
+    const fileDrop = clipboard.readBuffer('FileDrop')
+    if (fileDrop && fileDrop.length > 0) {
+      const paths = parseFileDrop(fileDrop)
+      if (paths.length > 0) return paths
+    }
+
+    // Fallback: FileNameW (single file)
+    const fileNameW = clipboard.readBuffer('FileNameW')
+    if (fileNameW && fileNameW.length > 0) {
+      const text = fileNameW.toString('utf16le').replace(/\0+$/, '')
+      if (text && fs.existsSync(text)) {
+        return [text]
+      }
+    }
+
+    // Fallback: text/uri-list
+    const uriList = clipboard.read('text/uri-list')
+    if (uriList && uriList.trim().length > 0) {
+      const paths = uriList
+        .split(/\r?\n/)
+        .filter(line => line.startsWith('file:///') && !line.startsWith('file:///.file'))
+        .map(line => {
+          let p = line.replace(/^file:\/\/\//, '')
+          p = decodeURIComponent(p)
+          p = p.replace(/\//g, '\\')
+          return p
+        })
+        .filter(p => p.length > 0 && fs.existsSync(p))
+      if (paths.length > 0) return paths
+    }
+
+    return []
+  } catch (e) {
+    console.error('Error reading clipboard files:', e)
+    return []
+  }
+}
+
 function startClipboardWatcher() {
   if (isWatching) return
   isWatching = true
 
   setInterval(() => {
     try {
+      // Check for text
       const text = clipboard.readText()
       if (text && text !== lastText && text.trim().length > 0) {
         lastText = text
-        store?.add(text)
+        store?.addText(text)
         mainWindow?.webContents.send('history-updated', store?.getAll() || [])
+      }
+
+      // Check for files
+      const files = getClipboardFiles()
+      if (files.length > 0) {
+        // Check if different from last
+        const filesKey = files.sort().join('|')
+        const lastKey = lastFilePaths.sort().join('|')
+        if (filesKey !== lastKey) {
+          lastFilePaths = [...files]
+          // Add each file individually
+          let added = false
+          for (const filePath of files) {
+            const result = store?.addFile(filePath)
+            if (result) added = true
+          }
+          if (added) {
+            mainWindow?.webContents.send('history-updated', store?.getAll() || [])
+          }
+        }
       }
     } catch (e) {
       // ignore clipboard errors
@@ -134,10 +256,49 @@ function registerIpcHandlers() {
     return store?.getAll() || []
   })
 
-  ipcMain.handle('copy-item', (_event, text: string) => {
-    clipboard.writeText(text)
-    lastText = text // prevent re-capturing
+  ipcMain.handle('copy-item', (_event, id: string) => {
+    const item = store?.getAll().find(i => i.id === id)
+    if (!item) return false
+
+    if (item.type === 'text') {
+      clipboard.writeText(item.text)
+      lastText = item.text
+    } else if (item.type === 'file' && item.storedPath) {
+      try {
+        const storedPath = item.storedPath
+        if (!fs.existsSync(storedPath)) return false
+
+        // Use PowerShell to set file to clipboard (proper CF_HDROP format)
+        const escapedPath = storedPath.replace(/'/g, "''")
+        const psCommand = `Set-Clipboard -Path '${escapedPath}'`
+        execSync(`powershell -NoProfile -Command "${psCommand}"`, { windowsHide: true })
+
+        // Update lastFilePaths to prevent re-capturing
+        lastFilePaths = [storedPath]
+      } catch (e) {
+        console.error('Failed to copy file to clipboard:', e)
+        return false
+      }
+    }
     return true
+  })
+
+  ipcMain.handle('open-file-location', (_event, id: string) => {
+    const item = store?.getAll().find(i => i.id === id)
+    if (item && item.type === 'file' && item.storedPath) {
+      shell.showItemInFolder(item.storedPath)
+      return true
+    }
+    return false
+  })
+
+  ipcMain.handle('open-file', (_event, id: string) => {
+    const item = store?.getAll().find(i => i.id === id)
+    if (item && item.type === 'file' && item.storedPath) {
+      shell.openPath(item.storedPath)
+      return true
+    }
+    return false
   })
 
   ipcMain.handle('delete-item', (_event, id: string) => {
@@ -165,7 +326,7 @@ function registerIpcHandlers() {
 
   // Settings handlers
   ipcMain.handle('get-settings', () => {
-    return settingsStore?.get() || { toggleShortcut: 'CommandOrControl+Shift+V' }
+    return settingsStore?.get() || { toggleShortcut: 'CommandOrControl+Shift+V', maxHistory: 200, maxFiles: 100 }
   })
 
   ipcMain.handle('set-toggle-shortcut', (_event, shortcut: string) => {
@@ -175,7 +336,15 @@ function registerIpcHandlers() {
   ipcMain.handle('set-max-history', (_event, max: number) => {
     const clamped = Math.max(10, Math.min(1000, Math.floor(max)))
     settingsStore?.setMaxHistory(clamped)
-    store?.setMaxItems(clamped)
+    store?.setMaxTextItems(clamped)
+    mainWindow?.webContents.send('history-updated', store?.getAll() || [])
+    return true
+  })
+
+  ipcMain.handle('set-max-files', (_event, max: number) => {
+    const clamped = Math.max(1, Math.min(500, Math.floor(max)))
+    settingsStore?.setMaxFiles(clamped)
+    store?.setMaxFileItems(clamped)
     mainWindow?.webContents.send('history-updated', store?.getAll() || [])
     return true
   })
@@ -214,7 +383,8 @@ function updateToggleShortcut(newShortcut: string): boolean {
 app.whenReady().then(() => {
   settingsStore = new SettingsStore()
   const maxHistory = settingsStore.getMaxHistory()
-  store = new ClipboardStore(maxHistory)
+  const maxFiles = settingsStore.getMaxFiles()
+  store = new ClipboardStore(maxHistory, maxFiles)
   createWindow()
   createTray()
   registerIpcHandlers()
