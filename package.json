@@ -1,0 +1,25 @@
+{
+  "name": "clipboard-vibe",
+  "version": "1.0.0",
+  "description": "A modern clipboard manager built with vibe coding",
+  "main": "dist-electron/main.js",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build && tsc -p tsconfig.electron.json",
+    "preview": "vite preview",
+    "electron:dev": "npm run build && electron .",
+    "electron:start": "electron ."
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.1",
+    "electron": "^31.0.0",
+    "typescript": "^5.4.5",
+    "vite": "^5.3.1"
+  }
+}
