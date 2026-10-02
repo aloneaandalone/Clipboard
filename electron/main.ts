@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, ipcMain, globalShortcut, Tray, Menu, nativeImage, shell, screen } from 'electron'
+import { app, BrowserWindow, clipboard, ipcMain, globalShortcut, Tray, Menu, nativeImage, shell, screen, dialog } from 'electron'
 import * as path from 'path'
 import * as fs from 'fs'
 import { execSync } from 'child_process'
@@ -220,27 +220,52 @@ function startClipboardWatcher() {
     try {
       // Check for text
       const text = clipboard.readText()
-      if (text && text !== lastText && text.trim().length > 0) {
-        lastText = text
-        store?.addText(text)
-        mainWindow?.webContents.send('history-updated', store?.getAll() || [])
+      if (text && text.trim().length > 0) {
+        if (text !== lastText) {
+          lastText = text
+          store?.addText(text)
+          mainWindow?.webContents.send('history-updated', store?.getAll() || [])
+        } else {
+          // Same text - check if it's favorited but not in history (needs restore)
+          const allItems = store?.getAll() || []
+          const item = allItems.find(i => i.type === 'text' && i.text === text)
+          if (item && !item.inHistory && item.favorite) {
+            store?.addText(text)
+            mainWindow?.webContents.send('history-updated', store?.getAll() || [])
+          }
+        }
       }
 
       // Check for files
       const files = getClipboardFiles()
       if (files.length > 0) {
-        // Check if different from last
         const filesKey = files.sort().join('|')
         const lastKey = lastFilePaths.sort().join('|')
         if (filesKey !== lastKey) {
           lastFilePaths = [...files]
-          // Add each file individually
           let added = false
           for (const filePath of files) {
             const result = store?.addFile(filePath)
             if (result) added = true
           }
           if (added) {
+            mainWindow?.webContents.send('history-updated', store?.getAll() || [])
+          }
+        } else {
+          // Same clipboard content - check if any favorited items need to be restored to history
+          const allItems = store?.getAll() || []
+          let needRestore = false
+          for (const filePath of files) {
+            const item = allItems.find(i => i.type === 'file' && i.text === filePath)
+            if (item && !item.inHistory && item.favorite) {
+              needRestore = true
+              break
+            }
+          }
+          if (needRestore) {
+            for (const filePath of files) {
+              store?.addFile(filePath)
+            }
             mainWindow?.webContents.send('history-updated', store?.getAll() || [])
           }
         }
@@ -307,9 +332,21 @@ function registerIpcHandlers() {
     return true
   })
 
+  ipcMain.handle('delete-from-favorites', (_event, id: string) => {
+    store?.deleteFromFavorites(id)
+    mainWindow?.webContents.send('history-updated', store?.getAll() || [])
+    return true
+  })
+
   ipcMain.handle('clear-history', () => {
     store?.clear()
-    mainWindow?.webContents.send('history-updated', [])
+    mainWindow?.webContents.send('history-updated', store?.getAll() || [])
+    return true
+  })
+
+  ipcMain.handle('clear-favorites', () => {
+    store?.clearFavorites()
+    mainWindow?.webContents.send('history-updated', store?.getAll() || [])
     return true
   })
 
@@ -348,6 +385,44 @@ function registerIpcHandlers() {
     mainWindow?.webContents.send('history-updated', store?.getAll() || [])
     return true
   })
+
+  ipcMain.handle('select-files-directory', async () => {
+    if (!mainWindow) return null
+    const result = await dialog.showOpenDialog(mainWindow, {
+      title: '选择文件存储目录',
+      properties: ['openDirectory', 'createDirectory'],
+    })
+    if (result.canceled || result.filePaths.length === 0) {
+      return null
+    }
+    return result.filePaths[0]
+  })
+
+  ipcMain.handle('set-files-directory', (_event, dir: string) => {
+    if (!dir) return false
+    const success = store?.setFilesDir(dir)
+    if (success) {
+      settingsStore?.setFilesDir(dir)
+      mainWindow?.webContents.send('history-updated', store?.getAll() || [])
+      return true
+    }
+    return false
+  })
+
+  ipcMain.handle('get-files-directory', () => {
+    return store?.getFilesDir() || ''
+  })
+
+  ipcMain.handle('reset-files-directory', () => {
+    const defaultDir = path.join(app.getPath('userData'), 'clipboard-files')
+    const success = store?.setFilesDir(defaultDir)
+    if (success) {
+      settingsStore?.setFilesDir('')
+      mainWindow?.webContents.send('history-updated', store?.getAll() || [])
+      return true
+    }
+    return false
+  })
 }
 
 function registerShortcuts() {
@@ -384,7 +459,12 @@ app.whenReady().then(() => {
   settingsStore = new SettingsStore()
   const maxHistory = settingsStore.getMaxHistory()
   const maxFiles = settingsStore.getMaxFiles()
+  const customFilesDir = settingsStore.getFilesDir()
   store = new ClipboardStore(maxHistory, maxFiles)
+  // If custom files directory is set, move files there
+  if (customFilesDir) {
+    store.setFilesDir(customFilesDir)
+  }
   createWindow()
   createTray()
   registerIpcHandlers()

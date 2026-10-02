@@ -11,6 +11,7 @@ export interface ClipboardItem {
   preview: string
   timestamp: number
   favorite: boolean
+  inHistory: boolean // whether to show in history (all tab)
   // file-specific fields
   fileName?: string
   fileSize?: number
@@ -49,12 +50,12 @@ export class ClipboardStore {
       if (fs.existsSync(this.filePath)) {
         const data = fs.readFileSync(this.filePath, 'utf-8')
         this.items = JSON.parse(data)
-        // Add type field to legacy items
+        // Migrate legacy items
         this.items = this.items.map(item => {
-          if (!item.type) {
-            return { ...item, type: 'text' as ClipboardItemType }
-          }
-          return item as ClipboardItem
+          const migrated = { ...item } as ClipboardItem
+          if (!migrated.type) migrated.type = 'text' as ClipboardItemType
+          if (migrated.inHistory === undefined) migrated.inHistory = true
+          return migrated
         })
       }
     } catch (e) {
@@ -116,43 +117,60 @@ export class ClipboardStore {
   }
 
   private trimItems() {
-    const textItems = this.items.filter(i => i.type === 'text')
-    const fileItems = this.items.filter(i => i.type === 'file')
+    // Trim text items (only count items in history)
+    const historyTextItems = this.items.filter(i => i.type === 'text' && i.inHistory)
+    if (historyTextItems.length > this.maxTextItems) {
+      const favorites = historyTextItems.filter(i => i.favorite)
+      const nonFavorites = historyTextItems.filter(i => !i.favorite)
+      const keepCount = Math.max(0, this.maxTextItems - favorites.length)
+      const itemsToRemoveFromHistory = nonFavorites.slice(keepCount)
 
-    // Trim text items
-    if (textItems.length > this.maxTextItems) {
-      const favText = textItems.filter(i => i.favorite)
-      const nonFavText = textItems.filter(i => !i.favorite)
-      const keepText = this.maxTextItems - favText.length
-      const newTextItems = [...favText, ...nonFavText.slice(0, Math.max(0, keepText))]
-
-      // Delete stored files for removed file items? No, file items are separate.
-      // Actually we need to update this.items
-      const remainingIds = new Set(newTextItems.map(i => i.id))
-      this.items = this.items.filter(i => i.type === 'file' || remainingIds.has(i.id))
-    }
-
-    // Trim file items
-    if (fileItems.length > this.maxFileItems) {
-      const favFiles = fileItems.filter(i => i.favorite)
-      const nonFavFiles = fileItems.filter(i => !i.favorite)
-      const keepFiles = this.maxFileItems - favFiles.length
-      const newFileItems = [...favFiles, ...nonFavFiles.slice(0, Math.max(0, keepFiles))]
-      const removedFiles = nonFavFiles.slice(Math.max(0, keepFiles))
-
-      // Delete actual files
-      removedFiles.forEach(item => {
-        this.deleteStoredFile(item.storedPath)
+      itemsToRemoveFromHistory.forEach(item => {
+        // Delete completely since they're not favorited
+        const idx = this.items.findIndex(i => i.id === item.id)
+        if (idx !== -1) {
+          this.items.splice(idx, 1)
+        }
       })
 
-      const remainingIds = new Set(newFileItems.map(i => i.id))
-      this.items = this.items.filter(i => i.type === 'text' || remainingIds.has(i.id))
+      // Also check if favorited items push us over - those just get removed from history
+      // (favorites are always kept regardless of max limit)
+    }
+
+    // Trim file items (only count items in history)
+    const historyFileItems = this.items.filter(i => i.type === 'file' && i.inHistory)
+    if (historyFileItems.length > this.maxFileItems) {
+      const favorites = historyFileItems.filter(i => i.favorite)
+      const nonFavorites = historyFileItems.filter(i => !i.favorite)
+      const keepCount = Math.max(0, this.maxFileItems - favorites.length)
+      const itemsToRemove = nonFavorites.slice(keepCount)
+
+      itemsToRemove.forEach(item => {
+        // Delete completely since they're not favorited
+        this.deleteStoredFile(item.storedPath)
+        const idx = this.items.findIndex(i => i.id === item.id)
+        if (idx !== -1) {
+          this.items.splice(idx, 1)
+        }
+      })
     }
   }
 
   addText(text: string): ClipboardItem {
-    // Remove duplicates (same text)
-    this.items = this.items.filter(item => !(item.type === 'text' && item.text === text))
+    // Check if we already have this text (in history or favorites)
+    const existing = this.items.find(
+      item => item.type === 'text' && item.text === text
+    )
+    if (existing) {
+      // Move to top of history (restore from favorites if needed)
+      this.items = this.items.filter(item => item.id !== existing.id)
+      existing.timestamp = Date.now()
+      existing.inHistory = true
+      this.items.unshift(existing)
+      this.trimItems()
+      this.save()
+      return existing
+    }
 
     const item: ClipboardItem = {
       id: this.generateId(),
@@ -160,6 +178,7 @@ export class ClipboardStore {
       text,
       timestamp: Date.now(),
       favorite: false,
+      inHistory: true,
       preview: text.length > 200 ? text.substring(0, 200) + '...' : text,
     }
 
@@ -179,14 +198,15 @@ export class ClipboardStore {
       const fileName = path.basename(originalPath)
       const fileSize = stat.size
 
-      // Check for duplicates (same file path)
+      // Check if we already have this file (in history or favorites)
       const existing = this.items.find(
         item => item.type === 'file' && item.text === originalPath
       )
       if (existing) {
-        // Move to top
+        // Move to top of history (restore from favorites if needed)
         this.items = this.items.filter(item => item.id !== existing.id)
         existing.timestamp = Date.now()
+        existing.inHistory = true
         this.items.unshift(existing)
         this.save()
         return existing
@@ -207,6 +227,7 @@ export class ClipboardStore {
         storedPath,
         timestamp: Date.now(),
         favorite: false,
+        inHistory: true,
         preview: storedFileName,
       }
 
@@ -224,6 +245,10 @@ export class ClipboardStore {
     return this.items
   }
 
+  getFavorites(): ClipboardItem[] {
+    return this.items.filter(i => i.favorite)
+  }
+
   getFileItems(): ClipboardItem[] {
     return this.items.filter(i => i.type === 'file')
   }
@@ -234,7 +259,36 @@ export class ClipboardStore {
 
   delete(id: string) {
     const item = this.items.find(i => i.id === id)
-    if (item && item.type === 'file') {
+    if (!item) return
+
+    // If item is favorited, just remove from history (keep in favorites)
+    if (item.favorite) {
+      item.inHistory = false
+      this.save()
+      return
+    }
+
+    // Otherwise, delete completely
+    if (item.type === 'file') {
+      this.deleteStoredFile(item.storedPath)
+    }
+    this.items = this.items.filter(item => item.id !== id)
+    this.save()
+  }
+
+  deleteFromFavorites(id: string) {
+    const item = this.items.find(i => i.id === id)
+    if (!item) return
+
+    // If item is in history, just unfavorite it
+    if (item.inHistory) {
+      item.favorite = false
+      this.save()
+      return
+    }
+
+    // Otherwise, delete completely
+    if (item.type === 'file') {
       this.deleteStoredFile(item.storedPath)
     }
     this.items = this.items.filter(item => item.id !== id)
@@ -242,14 +296,29 @@ export class ClipboardStore {
   }
 
   clear() {
-    // Keep favorites, but also keep file favorites
-    const removedItems = this.items.filter(i => !i.favorite)
-    removedItems.forEach(item => {
+    // Remove all non-favorite items from history
+    // Favorited items are kept but removed from history view
+    const toDelete = this.items.filter(i => !i.favorite)
+    toDelete.forEach(item => {
       if (item.type === 'file') {
         this.deleteStoredFile(item.storedPath)
       }
     })
     this.items = this.items.filter(i => i.favorite)
+    // Mark all favorites as not in history
+    this.items.forEach(i => { i.inHistory = false })
+    this.save()
+  }
+
+  clearFavorites() {
+    // Delete all favorited items completely
+    const favorites = this.items.filter(i => i.favorite)
+    favorites.forEach(item => {
+      if (item.type === 'file') {
+        this.deleteStoredFile(item.storedPath)
+      }
+    })
+    this.items = this.items.filter(i => !i.favorite)
     this.save()
   }
 
@@ -257,6 +326,13 @@ export class ClipboardStore {
     const item = this.items.find(i => i.id === id)
     if (item) {
       item.favorite = !item.favorite
+      // When unfavoriting and item is not in history, delete it completely
+      if (!item.favorite && !item.inHistory) {
+        if (item.type === 'file') {
+          this.deleteStoredFile(item.storedPath)
+        }
+        this.items = this.items.filter(i => i.id !== id)
+      }
       this.save()
     }
   }
@@ -280,6 +356,60 @@ export class ClipboardStore {
   getMaxFileItems(): number {
     return this.maxFileItems
   }
+
+  setFilesDir(newDir: string): boolean {
+    try {
+      if (!newDir || newDir === this.filesDir) return false
+
+      // Ensure new directory exists
+      if (!fs.existsSync(newDir)) {
+        fs.mkdirSync(newDir, { recursive: true })
+      }
+
+      // Move all stored files to new directory
+      const fileItems = this.items.filter(i => i.type === 'file' && i.storedPath)
+      for (const item of fileItems) {
+        if (item.storedPath && fs.existsSync(item.storedPath)) {
+          const fileName = path.basename(item.storedPath)
+          const newPath = path.join(newDir, fileName)
+          try {
+            if (fs.existsSync(newPath)) {
+              // If file exists in new location, use a unique name
+              const ext = path.extname(fileName)
+              const base = path.basename(fileName, ext)
+              let counter = 1
+              let uniquePath = newPath
+              while (fs.existsSync(uniquePath)) {
+                uniquePath = path.join(newDir, `${base} (${counter})${ext}`)
+                counter++
+              }
+              fs.renameSync(item.storedPath, uniquePath)
+              item.storedPath = uniquePath
+              item.fileName = path.basename(uniquePath)
+              item.preview = path.basename(uniquePath)
+            } else {
+              fs.renameSync(item.storedPath, newPath)
+              item.storedPath = newPath
+            }
+          } catch (e) {
+            console.error('Failed to move file:', item.storedPath, e)
+          }
+        }
+      }
+
+      // Update filesDir
+      this.filesDir = newDir
+      this.save()
+      return true
+    } catch (e) {
+      console.error('Failed to set files directory:', e)
+      return false
+    }
+  }
+
+  getFilesDir(): string {
+    return this.filesDir
+  }
 }
 
 // ─── Settings Store ───────────────────────────────────────────
@@ -288,12 +418,14 @@ export interface AppSettings {
   toggleShortcut: string
   maxHistory: number
   maxFiles: number
+  filesDir: string
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
   toggleShortcut: 'CommandOrControl+Shift+V',
   maxHistory: 200,
   maxFiles: 100,
+  filesDir: '',
 }
 
 export class SettingsStore {
@@ -364,6 +496,16 @@ export class SettingsStore {
   setMaxFiles(max: number): boolean {
     const clamped = Math.max(1, Math.min(500, Math.floor(max)))
     this.settings.maxFiles = clamped
+    this.save()
+    return true
+  }
+
+  getFilesDir(): string {
+    return this.settings.filesDir || ''
+  }
+
+  setFilesDir(dir: string): boolean {
+    this.settings.filesDir = dir
     this.save()
     return true
   }

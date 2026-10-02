@@ -6,7 +6,6 @@ type TabType = 'all' | 'files' | 'favorites' | 'settings'
 const DEFAULT_SHORTCUT = 'CommandOrControl+Shift+V'
 const DEFAULT_MAX_HISTORY = 200
 const DEFAULT_MAX_FILES = 100
-
 // Convert Electron accelerator to display text
 function shortcutToDisplay(shortcut: string): string {
   return shortcut
@@ -96,6 +95,7 @@ function App() {
     toggleShortcut: DEFAULT_SHORTCUT,
     maxHistory: DEFAULT_MAX_HISTORY,
     maxFiles: DEFAULT_MAX_FILES,
+    filesDir: '',
   })
   const [isRecording, setIsRecording] = useState(false)
   const [recordedKeys, setRecordedKeys] = useState<string>('')
@@ -107,8 +107,8 @@ function App() {
     const matchesSearch = searchQuery === '' ||
       item.preview.toLowerCase().includes(searchQuery.toLowerCase()) ||
       (item.fileName && item.fileName.toLowerCase().includes(searchQuery.toLowerCase()))
-    const matchesTab = activeTab === 'all' ||
-      (activeTab === 'files' && item.type === 'file') ||
+    const matchesTab = (activeTab === 'all' && item.inHistory) ||
+      (activeTab === 'files' && item.type === 'file' && item.inHistory) ||
       (activeTab === 'favorites' && item.favorite)
     return matchesSearch && matchesTab
   })
@@ -124,6 +124,9 @@ function App() {
   useEffect(() => {
     if (window.clipboardApi) {
       window.clipboardApi.getSettings().then(s => setSettings(s))
+      window.clipboardApi.getFilesDirectory().then(dir => {
+        setSettings(prev => ({ ...prev, filesDir: dir }))
+      })
     }
   }, [])
 
@@ -234,9 +237,13 @@ function App() {
     window.clipboardApi?.hideWindow()
   }, [])
 
-  const handleDelete = useCallback((id: string) => {
-    window.clipboardApi?.deleteItem(id)
-  }, [])
+  const handleDelete = useCallback(async (id: string) => {
+    if (activeTab === 'favorites') {
+      await window.clipboardApi?.deleteFromFavorites(id)
+    } else {
+      await window.clipboardApi?.deleteItem(id)
+    }
+  }, [activeTab])
 
   const handleToggleFavorite = useCallback((id: string, e: React.MouseEvent) => {
     e.stopPropagation()
@@ -253,9 +260,15 @@ function App() {
     window.clipboardApi?.openFileLocation(id)
   }, [])
 
-  const handleClearAll = useCallback(() => {
+  const handleClearHistory = useCallback(() => {
     if (confirm('确定要清空所有剪贴板历史吗？收藏的内容会保留。')) {
       window.clipboardApi?.clearHistory()
+    }
+  }, [])
+
+  const handleClearFavorites = useCallback(() => {
+    if (confirm('确定要清空所有收藏吗？此操作不可恢复。')) {
+      window.clipboardApi?.clearFavorites()
     }
   }, [])
 
@@ -308,15 +321,34 @@ function App() {
     await window.clipboardApi?.setMaxFiles(clamped)
   }, [])
 
+  const handleSelectFilesDir = useCallback(async () => {
+    const dir = await window.clipboardApi?.selectFilesDirectory()
+    if (dir) {
+      const success = await window.clipboardApi?.setFilesDirectory(dir)
+      if (success) {
+        setSettings(prev => ({ ...prev, filesDir: dir }))
+      }
+    }
+  }, [])
+
+  const handleResetFilesDir = useCallback(async () => {
+    const success = await window.clipboardApi?.resetFilesDirectory()
+    if (success) {
+      setSettings(prev => ({ ...prev, filesDir: '' }))
+    }
+  }, [])
+
   const resetAllSettings = useCallback(async () => {
     if (window.clipboardApi) {
       await window.clipboardApi.setToggleShortcut(DEFAULT_SHORTCUT)
       await window.clipboardApi.setMaxHistory(DEFAULT_MAX_HISTORY)
       await window.clipboardApi.setMaxFiles(DEFAULT_MAX_FILES)
+      await window.clipboardApi.resetFilesDirectory()
       setSettings({
         toggleShortcut: DEFAULT_SHORTCUT,
         maxHistory: DEFAULT_MAX_HISTORY,
         maxFiles: DEFAULT_MAX_FILES,
+        filesDir: '',
       })
       setSaveStatus('success')
       setTimeout(() => setSaveStatus('idle'), 2000)
@@ -357,10 +389,19 @@ function App() {
             <span>Clipboard Vibe</span>
           </div>
           <div className="header-actions">
-            {!isSettingsTab && (
+            {!isSettingsTab && activeTab === 'favorites' && (
               <button
                 className="icon-btn danger"
-                onClick={handleClearAll}
+                onClick={handleClearFavorites}
+                title="清空收藏"
+              >
+                🗑️
+              </button>
+            )}
+            {!isSettingsTab && activeTab !== 'favorites' && (
+              <button
+                className="icon-btn danger"
+                onClick={handleClearHistory}
                 title="清空历史"
               >
                 🗑️
@@ -522,7 +563,7 @@ function App() {
 
           <div className="setting-section">
             <div className="setting-title">文件存储设置</div>
-            <div className="setting-desc">调整文件剪贴板最多保存的文件数量</div>
+            <div className="setting-desc">调整文件剪贴板最多保存的文件数量和存储位置</div>
 
             <div className="setting-row">
               <div className="setting-label">最大文件数</div>
@@ -554,6 +595,34 @@ function App() {
               </div>
             </div>
 
+            <div className="setting-row">
+              <div className="setting-label">存储位置</div>
+              <div className="setting-control">
+                <button
+                  className="btn btn-secondary"
+                  onClick={handleSelectFilesDir}
+                >
+                  📂 选择目录
+                </button>
+              </div>
+            </div>
+
+            <div className="path-display">
+              <span className="path-icon">📁</span>
+              <span className="path-text">
+                {settings.filesDir || '默认位置 (AppData/clipboard-files)'}
+              </span>
+            </div>
+
+            {settings.filesDir && (
+              <button
+                className="btn btn-ghost"
+                onClick={handleResetFilesDir}
+              >
+                恢复默认存储位置
+              </button>
+            )}
+
             <div className="setting-hints">
               <div className="hint-title">💡 提示</div>
               <ul>
@@ -561,6 +630,7 @@ function App() {
                 <li>文件会保存在本地存储目录中</li>
                 <li>收藏的文件不会被自动清理</li>
                 <li>当前已保存 {fileCount} 个文件</li>
+                <li>更改存储位置会自动迁移已有文件</li>
               </ul>
             </div>
           </div>
