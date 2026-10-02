@@ -226,11 +226,11 @@ function startClipboardWatcher() {
           store?.addText(text)
           mainWindow?.webContents.send('history-updated', store?.getAll() || [])
         } else {
-          // Same text - check if it's favorited but not in history (needs restore)
+          // Same text - bump to top of history (restore if favorited-only)
           const allItems = store?.getAll() || []
           const item = allItems.find(i => i.type === 'text' && i.text === text)
-          if (item && !item.inHistory && item.favorite) {
-            store?.addText(text)
+          if (item) {
+            store?.addText(text) // addText handles moving to top
             mainWindow?.webContents.send('history-updated', store?.getAll() || [])
           }
         }
@@ -252,20 +252,17 @@ function startClipboardWatcher() {
             mainWindow?.webContents.send('history-updated', store?.getAll() || [])
           }
         } else {
-          // Same clipboard content - check if any favorited items need to be restored to history
+          // Same clipboard content - bump to top of history (restore if favorited-only)
           const allItems = store?.getAll() || []
-          let needRestore = false
+          let needsUpdate = false
           for (const filePath of files) {
             const item = allItems.find(i => i.type === 'file' && i.text === filePath)
-            if (item && !item.inHistory && item.favorite) {
-              needRestore = true
-              break
+            if (item) {
+              store?.addFile(filePath) // addFile handles moving to top
+              needsUpdate = true
             }
           }
-          if (needRestore) {
-            for (const filePath of files) {
-              store?.addFile(filePath)
-            }
+          if (needsUpdate) {
             mainWindow?.webContents.send('history-updated', store?.getAll() || [])
           }
         }
