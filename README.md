@@ -56,7 +56,24 @@ Clipboard Vibe 会在后台自动记录所有复制过的**文字**和**文件**
 - 无边框透明窗口
 - 可调整窗口大小
 
-## 安装方法
+## 下载安装
+
+### Windows 用户（推荐）
+
+直接下载最新的 `.exe` 安装包，双击安装即可使用，无需安装 Node.js。
+
+👉 [前往 Releases 下载](https://github.com/aloneaandalone/Clipboard/releases)
+
+安装完成后：
+1. 从开始菜单或桌面快捷方式启动 **Clipboard Vibe**
+2. 应用会在系统托盘后台运行
+3. 按下 `Ctrl + Shift + V` 唤出剪贴板窗口
+
+---
+
+## 从源码构建
+
+如果你想自己编译或参与开发，可以从源码构建。
 
 ### 环境要求
 
@@ -65,33 +82,32 @@ Clipboard Vibe 会在后台自动记录所有复制过的**文字**和**文件**
 
 ### 步骤
 
-1. **安装依赖**
+1. **克隆项目**
+
+   ```bash
+   git clone https://github.com/aloneaandalone/Clipboard.git
+   cd Clipboard
+   ```
+
+2. **安装依赖**
 
    ```bash
    npm install
    ```
 
-2. **构建项目**
+3. **开发模式运行**
 
    ```bash
-   npm run build
+   npm run electron:dev
    ```
 
-3. **启动应用**
+4. **打包成安装包**
 
    ```bash
-   # 方式一：命令行启动（有日志输出）
-   npm run electron:start
-
-   # 方式二：双击启动（无黑窗口，推荐日常使用）
-   # 双击项目目录下的 "Clipboard Vibe.vbs"
+   npm run dist:win
    ```
 
-### 开发模式
-
-```bash
-npm run electron:dev
-```
+   打包完成后，安装包会输出到 `release/` 目录。
 
 ## 使用方法
 

@@ -4,6 +4,10 @@ node_modules
 # Build output
 dist
 dist-electron
+release
+
+# Electron builder cache
+.electron-builder
 
 # Logs
 *.log
