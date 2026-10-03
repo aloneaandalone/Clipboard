@@ -226,11 +226,11 @@ function startClipboardWatcher() {
           store?.addText(text)
           mainWindow?.webContents.send('history-updated', store?.getAll() || [])
         } else {
-          // Same text - bump to top of history (restore if favorited-only)
+          // Same text - check if it needs to be added or restored to history
           const allItems = store?.getAll() || []
           const item = allItems.find(i => i.type === 'text' && i.text === text)
-          if (item) {
-            store?.addText(text) // addText handles moving to top
+          if (!item || !item.inHistory) {
+            store?.addText(text)
             mainWindow?.webContents.send('history-updated', store?.getAll() || [])
           }
         }
@@ -252,13 +252,13 @@ function startClipboardWatcher() {
             mainWindow?.webContents.send('history-updated', store?.getAll() || [])
           }
         } else {
-          // Same clipboard content - bump to top of history (restore if favorited-only)
+          // Same clipboard content - check if any need to be added or restored to history
           const allItems = store?.getAll() || []
           let needsUpdate = false
           for (const filePath of files) {
             const item = allItems.find(i => i.type === 'file' && i.text === filePath)
-            if (item) {
-              store?.addFile(filePath) // addFile handles moving to top
+            if (!item || !item.inHistory) {
+              store?.addFile(filePath)
               needsUpdate = true
             }
           }

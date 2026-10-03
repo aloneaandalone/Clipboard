@@ -198,9 +198,10 @@ export class ClipboardStore {
       const fileName = path.basename(originalPath)
       const fileSize = stat.size
 
-      // Check if we already have this file (in history or favorites)
+      // Check if we already have this file (by original path or stored path)
       const existing = this.items.find(
-        item => item.type === 'file' && item.text === originalPath
+        item => item.type === 'file' &&
+          (item.text === originalPath || item.storedPath === originalPath)
       )
       if (existing) {
         // Move to top of history (restore from favorites if needed)
